@@ -1,0 +1,245 @@
+---
+title: "Bohlen data workflow"
+author: "sharan"
+date: "26/01/2021"
+output: html_document
+---
+
+
+
+```{r setup, include=FALSE, results='hide'}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/Sharan/Desktop/root/UCL files/proj Melissa 25 nov/bohlen paper/ ") 
+library(dplyr)
+library(DESeq2)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(RColorBrewer)
+```
+
+## Data prep
+
+```{r dataprep}
+
+bdata = read.csv(file = "GSE96995_processed_FPKM.csv", header = TRUE)
+bdata = bdata[!apply(bdata == "", 1, all),]     # Filtering out empty rows
+gene_names_bdata = bdata[,1]
+bdata = bdata[,-c(1)]
+row.names(bdata) = gene_names_bdata
+
+bdata[] <- lapply(bdata, gsub, pattern=',', replacement='') #taking out commas, they cause error
+bdata[] <- lapply(bdata, function(x) as.numeric(as.character(x))) # converting all cols from character to numeric class
+bdata[] <- lapply(bdata, function(x) ceiling(x)) #Deseq needs integers
+
+bdata = bdata[,-c(1:3)] #Removing acute cols as they skew distribution
+
+```
+
+
+
+```{r data filtering}
+
+rm = rowMeans(bdata, na.rm = TRUE)
+length(rm)
+length(rm[rm>0.0001])
+expressed_genes = which(rm>0.0001)
+bdata = bdata[expressed_genes,]
+
+```
+
+
+```{r column metadata}
+## Df for Bohlen
+Condition <- c( rep("TIC",6), rep("FCS-1",5), rep("FCS-3",4), rep("FCS-5",4)) %>% as.factor()
+Condition_broad <- c( rep("TIC",6), rep("FCS",13)) %>% as.factor()
+Bohlen_columns_metadata = data.frame(Condition, Condition_broad, row.names =  colnames(bdata))
+
+```
+
+
+## DEseq2
+
+
+```{r Deseq2}
+
+# creating DeSeq object
+dds <- DESeqDataSetFromMatrix(bdata, #Make sure to specify correct input data & colData
+                              colData = Bohlen_columns_metadata, 
+                              design = ~ Condition )
+
+
+# Transform counts for data visualization & outlier detection (PCA & Heatmap)
+rld <- rlog(dds, blind=TRUE)   #normalize and rlog transforms raw counts
+
+# Plot PCA
+
+DESeq2::plotPCA(rld, intgroup = "Condition")
+
+# Extract the rlog matrix from the object and compute pairwise correlation values
+rld_mat <- assay(rld)
+rld_cor <- cor(rld_mat)
+
+# Plot heatmap
+pheatmap::pheatmap(rld_cor, annotation = Bohlen_columns_metadata[, c("Condition","Condition_broad"), drop=F])
+
+# Run DESeq2 differential expression analysis
+dds <- DESeq(dds)
+# Plot dispersion estimates
+plotDispEsts(dds)
+```
+
+
+```{r contrast}
+
+contrast_TICH_FCS <- c("Condition_broad", "TIC", "FCS")
+Contrast_TICH_FCS.3 <- c("Condition", "TIC", "FCS-3")
+Contrast_TICH_FCS.5 <- c("Condition", "TIC", "FCS-5")
+Contrast_Serum_TICH <- c("Condition", "FCS-5","TIC")  #Inverse to match pseudobulk workflow
+
+res <- results(dds, 
+               contrast = Contrast_Serum_TICH,
+               alpha = 0.05)
+
+
+res <- lfcShrink(dds, 
+                 contrast =  Contrast_Serum_TICH,
+                 res=res,
+                 type = "normal") # type=apeglm did not work, wonder why
+
+```
+
+
+Generating table of results and extracting desired values
+```{r results}
+res_tbl <- res %>%
+  data.frame() %>%
+  rownames_to_column(var="gene") %>%
+  as_tibble()
+
+# Check results output
+res_tbl
+
+# Table of results for significant genes
+# Set thresholds
+padj_cutoff <- 0.05
+
+# Subset the significant results
+sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff) %>%
+  dplyr::arrange(padj)
+
+# Check significant genes output
+sig_res
+
+
+#Scatterplot of normalized expression of top 20 most significant genes
+
+normalized_counts <- counts(dds, 
+                            normalized = TRUE)
+
+## Order results by padj values
+top20_sig_genes <- sig_res %>%
+  dplyr::arrange(padj) %>%
+  dplyr::pull(gene) %>%
+  head(n=20)
+
+
+top20_sig_norm <- data.frame(normalized_counts) %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::filter(gene %in% top20_sig_genes)
+
+
+gathered_top20_sig <- top20_sig_norm %>%
+  gather(colnames(top20_sig_norm)[2:length(colnames(top20_sig_norm))], key = "samplename", value = "normalized_counts")
+
+```
+
+
+##Visualizing results
+
+Scatterplot
+```{r scatterplot}
+
+ggplot(gathered_top20_sig) +
+  geom_point(aes(x = gene, 
+                 y = normalized_counts, 
+                 color = samplename, 
+                 size = 0.5), 
+             position=position_jitter(w=0.1,h=0)) +
+  scale_y_log10() +
+  xlab("Genes") +
+  ylab("log10 Normalized Counts") +
+  ggtitle("Top 20 Significant DE Genes for selected contrast group") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Heatmap of all genes
+
+# Extract normalized counts for only the significant genes
+sig_norm <- data.frame(normalized_counts) %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::filter(gene %in% sig_res$gene)
+
+# Set a color palette
+heat_colors <- brewer.pal(6, "YlOrRd")
+# Run pheatmap using the metadata data frame for the annotation
+pheatmap::pheatmap(sig_norm[ , 2:length(colnames(sig_norm))], 
+         color = heat_colors, # Find a cool color palette
+         cluster_rows = T, 
+         show_rownames = F,
+         annotation = Bohlen_columns_metadata[, c("Condition", "Condition_broad")], 
+         border_color = NA, 
+         fontsize = 10, 
+         scale = "row", 
+         fontsize_row = 10, 
+         height = 20,
+         main = "Heatmap of DEGs between selected contrast groups")        
+
+
+```
+
+
+Volcano plot and MA plot
+```{r plots}
+## Obtain logical vector where TRUE values denote padj values < 0.05 and fold change > 1.5 in either direction
+res_table_thres <- res_tbl %>% 
+  mutate(threshold = padj < 0.05 & abs(log2FoldChange) >= 0.5)
+
+
+## creating genelabels column for labelling
+res_table_thres<- res_table_thres %>% arrange(padj) %>% mutate(genelabels = "")
+
+# For specific genes, get position of them first then insert. 
+interest_genes = c("Apoe","Cst3","C1qa","C1qb","C1qc","Scd2","Sod2","Spp1","Tmem176a","Tmem176b","Clec4a1","Lsp1")
+Andreone_genes = c("Il1b","Cxcl1","Cxcl8","Ccl2","Il15","Il10","Il6","Ccl20","Il23a","Tnfsf15","Il1rn","Cxcl5","Cxcl3","Cxcl10","Cxcl14")
+Paper_genes = c("Scd2","Scd1","Srebf1","C1qa","C1qb","C1qc","Id3","Apoe")
+interest_pos = ( match(Paper_genes,res_table_thres$gene) %>% na.omit() )
+
+
+
+res_table_thres$genelabels[Paper_genes] <- res_table_thres$gene[Paper_genes]
+
+## Volcano plot
+ggplot(res_table_thres, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(colour = threshold)) +
+  geom_text_repel(aes(label = genelabels)) +
+  ggtitle("Volcano plot of DEGs between TICH and Serum") +
+  xlab("log2 fold change") + 
+  ylab("-log10 adjusted p-value") +
+  #scale_y_continuous(limits = c(0,50)) +     (this line makes plot look cleaner but labels dont work if used)
+  theme(legend.position = "none",
+        plot.title = element_text(size = rel(1.5), hjust = 0.5),
+        axis.title = element_text(size = rel(1.25))) 
+
+
+
+# MA plot; requires 3 columns: mean, log fold change, logical table like threshold or significance
+
+ma = res_table_thres[, c("baseMean", "log2FoldChange", "threshold")]
+
+plotMA(ma,ylim=c(-5,5))
+
+```

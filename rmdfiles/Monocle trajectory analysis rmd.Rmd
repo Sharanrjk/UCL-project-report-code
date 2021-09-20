@@ -1,0 +1,278 @@
+---
+title: "Monocle workflow"
+author: "sharan"
+date: "11/01/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE, results='hide'}
+knitr::opts_chunk$set(echo = TRUE)
+setwd(" ")
+
+library(monocle3)
+library(Seurat)
+library(dplyr)
+
+```
+
+## Load files and make cds object
+Expression matrix, annotation, and metadata were extracted from the Seurat object and stored as RDS to load.
+Gene annotation needs to be a factor thus converting it.
+
+```{r}
+singlets_expression_matrix = readRDS(file = "singlet_expression_matrix.rds")
+singlets_gene_annotation = readRDS(file = "singlet_gene_annotation.rds")
+singlets_cell_metadata = readRDS(file = "singlet_cell_metadata.rds")
+singlets_gene_annotation$gene_short_name = singlets_gene_annotation$gene_short_name %>% as.factor()
+
+
+# Make the CDS object
+cds <- new_cell_data_set(singlets_expression_matrix,
+                         cell_metadata = singlets_cell_metadata,
+                         gene_metadata = singlets_gene_annotation)
+
+
+```
+
+## Preprocess and check data
+
+```{r}
+cds <- preprocess_cds(cds, num_dim = 25)
+plot_pc_variance_explained(cds)
+```
+25 dimensions seem more than enough, most variation is captured in first 10
+
+```{r, message=FALSE, echo=FALSE}
+cds <- reduce_dimension(cds)
+plot_cells(cds, color_cells_by = "HTO_classification", 
+           label_cell_groups = FALSE, reduction_method = "UMAP",
+           cell_size = 1)
+plot_cells(cds, genes = c("Aif1","Apoe"), cell_size = 1)
+```
+We reduce dimension for visualization here, the standard for monocle is UMAP, which is also better for trajectory analysis. we can then visualize the reduced data by the metadata, expression of genes (and even clusters and partitions after clustering is performed)
+
+```{r, message=FALSE, echo=FALSE}
+cds <- cluster_cells(cds, resolution = 0.000037 ) # above resolution = 0.000036 leads to 4 clusters but also 4 partitions, while below is 3 and 1 respectively
+
+plot_cells(cds, color_cells_by = "cluster", 
+           label_cell_groups = FALSE, cell_size = 1) 
+plot_cells(cds, color_cells_by = "partition", 
+           label_cell_groups = FALSE, cell_size = 1)
+```
+
+
+
+## Differential analysis
+
+```{r, message=FALSE, echo=FALSE}
+
+marker_test_res <- top_markers(cds, group_cells_by="cluster", 
+                               reference_cells=1000)
+
+top_specific_markers <- marker_test_res %>%
+  filter(fraction_expressing >= 0.10) %>%
+  group_by(cell_group) %>%
+  top_n(3, pseudo_R2)
+
+top_specific_marker_ids <- unique(top_specific_markers %>% pull(gene_id))
+
+plot_genes_by_group(cds,
+                    top_specific_marker_ids,
+                    group_cells_by="cluster",
+                    ordering_type="cluster_row_col",
+                    max.size=8)
+
+```
+
+
+
+```{r, message=FALSE, echo=FALSE}
+
+```
+
+
+## Regression analysis
+
+In this analysis, we are seeing if some interesting genes (such as Apoe Plcg2 etc) vary between clusters
+
+```{r, message=FALSE, echo=FALSE}
+interest_genes <- c("Apoe","Plcg2","Sod2","C1qa")
+cds_subset <- cds[rowData(cds)$gene_short_name %in% interest_genes,]
+
+gene_fits <- fit_models(cds_subset, model_formula_str = "~cluster")
+fit_coefs <- coefficient_table(gene_fits)
+
+cluster_terms <- fit_coefs %>% filter(term != "(Intercept)") #Removing intercept terms, we dont want them. (where is result for cluster1?)
+
+
+cluster_terms %>% filter (q_value < 0.05) %>%
+  select(gene_short_name, term, q_value, estimate)
+```
+
+
+
+## Graph auto-correlation analysis, to compare clusters
+
+WARNING: below chunk will take around 20 mins to run (In my laptop atleast). IF we have the RDS file we can skip below chunk
+```{r, message=FALSE, echo=FALSE}
+#deg_graph_test_res <- graph_test(cds, neighbor_graph="knn") # Takes long time to run, RDS is stored
+```
+
+
+```{r, message=FALSE, echo=FALSE, fig.height=10}
+deg_graph_test_res <- readRDS(file = "deg_graph_test_res.rds")
+
+pr_deg_ids <- row.names(subset(deg_graph_test_res, q_value < 0.05))
+
+gene_module_df <- find_gene_modules(cds[pr_deg_ids,], resolution=1e-2)
+
+
+cell_group_df <- tibble::tibble(cell=row.names(colData(cds)), 
+                                cell_group=clusters(cds))         # Can either use function clusters or partitions
+agg_mat <- aggregate_gene_expression(cds, gene_module_df, cell_group_df)
+
+row.names(agg_mat) <- stringr::str_c("Module ", row.names(agg_mat))
+colnames(agg_mat) <- stringr::str_c("clusters ", colnames(agg_mat))
+
+pheatmap::pheatmap(agg_mat, cluster_rows=TRUE, cluster_cols=TRUE,
+                   scale="column", clustering_method="ward.D2",
+                   fontsize=6)
+
+
+plot_cells(cds, 
+           genes=gene_module_df %>% filter(module %in% c(18,28,22)),
+           group_cells_by="cluster",
+           color_cells_by="cluster",
+           show_trajectory_graph=FALSE, cell_size = 2)
+
+gene_module_df[gene_module_df$module == 18,]
+```
+
+## Trajectory graph and Pseudotime
+
+```{r, message=FALSE, echo=FALSE}
+cds <- learn_graph(cds)
+cds <- order_cells(cds)     #Choose " root" node
+plot_cells(cds, color_cells_by = "pseudotime",
+            cell_size = 1)
+
+
+```
+
+WARNING: below code takes 15-20 mins to run (In my laptop atleast)
+```{r}
+#pseudotime_cds_pr_test_res <- graph_test(cds, neighbor_graph="principal_graph")
+```
+
+```{r, message=FALSE, echo=FALSE, fig.height=10}
+pseudotime_cds_pr_test_res = readRDS(file = "pseudotime_cds_pr_test_res.rds")
+
+pr_deg_ids <- row.names(subset(pseudotime_cds_pr_test_res, q_value < 1e-20)) #Absurdly low q-values??!
+
+plot_cells(cds, genes = "Vta1", cell_size = 1)
+
+gene_module_df <- find_gene_modules(cds[pr_deg_ids,], resolution=0.001) #Not working at certain resolutions, get error in leidenbase or contrasts..
+
+cell_group_df <- tibble::tibble(cell=row.names(colData(cds)), 
+                                cell_group=clusters(cds))
+agg_mat <- aggregate_gene_expression(cds, gene_module_df, cell_group_df)
+row.names(agg_mat) <- stringr::str_c("Module ", row.names(agg_mat))
+pheatmap::pheatmap(agg_mat,
+                   scale="column", clustering_method="ward.D2")
+
+plot_cells(cds, 
+           genes=gene_module_df %>% filter(module %in% c(2)),
+           group_cells_by="cluster",
+           color_cells_by="cluster",
+           show_trajectory_graph=FALSE, cell_size = 1) # Since trajectory graph goes from cluster to cluster, how can we be sure this isnt same as diffgene exp for cluster/
+
+gene_module_df[gene_module_df$module == 2,]
+```
+Now we are looking at each branch to analyze
+
+```{r}
+ # analyzing branches for pseudotime analysis
+
+cds_Serum_branch <- choose_cells(cds)
+cds_rest_branch <- choose_cells(cds)
+
+
+#cds_serum_pr_test_res <- graph_test(cds_Serum_branch, neighbor_graph="principal_graph")
+#cds_rest_pr_test_res <- graph_test(cds_rest_branch, neighbor_graph="principal_graph")
+
+cds_serum_pr_test_res <- readRDS("cds_serum_pr_test_res.rds")
+cds_rest_pr_test_res <- readRDS("cds_rest_pr_test_res.rds")
+
+pr_deg_serum_subset_ids <- row.names(subset(cds_serum_pr_test_res, q_value < 0.05))
+pr_deg_rest_subset_ids <- row.names(subset(cds_rest_pr_test_res, q_value < 0.05))
+
+
+gene_module_serum_df <- find_gene_modules(cds_Serum_branch[pr_deg_serum_subset_ids,], resolution=0.001)
+gene_module_rest_df <- find_gene_modules(cds_rest_branch[pr_deg_rest_subset_ids,], resolution=0.001)
+
+
+# Organize modules by similarity (using hclust) over the trajectory
+## Serum
+agg_mat_serum <- aggregate_gene_expression(cds_Serum_branch, gene_module_serum_df)
+module_dendro_serum <- hclust(dist(agg_mat))
+gene_module_serum_df$module <- factor(gene_module_serum_df$module, 
+                                levels = row.names(agg_mat_serum)[module_dendro_serum$order])
+## Rest
+agg_mat_rest <- aggregate_gene_expression(cds_Serum_rest, gene_module_rest_df)
+module_dendro_rest <- hclust(dist(agg_mat))
+gene_module_rest_df$module <- factor(gene_module_rest_df$module, 
+                                      levels = row.names(agg_mat_rest)[module_dendro_rest$order])
+
+
+## removing NAs
+gene_module_serum_df = gene_module_serum_df[complete.cases(gene_module_serum_df), ]
+gene_module_rest_df = gene_module_rest_df[complete.cases(gene_module_rest_df), ]
+
+
+```
+
+Now we are plotting them in different ways
+
+```{r}
+
+### plotting serum heatmap
+cell_group_df_serum <- tibble::tibble(cell=row.names(colData(cds_Serum_branch)), 
+                                cell_group=clusters(cds_Serum_branch))
+agg_mat_serum_heatmap <- aggregate_gene_expression(cds_Serum_branch, gene_module_serum_df, cell_group_df_serum)
+row.names(agg_mat_serum_heatmap) <- stringr::str_c("Module ", row.names(agg_mat_serum_heatmap))
+pheatmap::pheatmap(agg_mat_serum_heatmap,
+                   scale="column", clustering_method="ward.D2")
+
+
+
+# Plotting modules
+plot_cells(cds_Serum_branch,
+           genes=gene_module_serum_df,
+           label_cell_groups=FALSE,
+           show_trajectory_graph=FALSE,
+           cell_size = 2) #  What to infer from this plot, how to draw conclusions? genes seem to show trajectory or polarization within cluster, not between them
+
+
+
+gene_module_serum_df[gene_module_serum_df$module == 7, ]
+
+
+```
+
+
+
+From the modules we can select some interesting genes
+
+```{r}
+interest_genes <- c("C1qb", "Apoe")
+interest_cds <- cds[rowData(cds)$gene_short_name %in% interest_genes,]
+
+plot_genes_in_pseudotime(interest_cds, cell_size = 1, color_cells_by = "pseudotime",
+                         min_expr=0.5)
+plot_cells(cds, genes = interest_genes, cell_size = 1 )
+
+```
+
+
+
+

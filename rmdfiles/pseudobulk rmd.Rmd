@@ -1,0 +1,347 @@
+---
+title: "Pseudobulk"
+author: "sharan"
+date: "18/01/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE, results='hide'}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("C:/Users/Sharan/Desktop/root/UCL files/proj Melissa 25 nov/") 
+library(Seurat)
+library(dplyr)
+library(DESeq2)
+library(tibble)
+library(tidyr)
+library(ggplot2)
+library(ggrepel)
+library(pheatmap)
+library(RColorBrewer)
+```
+
+## Data prep
+
+```{r dataprep}
+
+mdata = readRDS("C:/Users/Sharan/Desktop/root/UCL files/proj Melissa 25 nov/singlets_24Nov20.rds")
+
+mdata$HTO_classification = factor(mdata$HTO_classification) #Removing unnecessary levels in HTO classification
+
+# Comparing our data w bohlen; have to avg out expression across HTO first to compare w bulk 
+Idents(object = mdata) <- "HTO_classification"
+
+gene_count_per_cell = mdata@assays[["RNA"]]@counts %>% as.data.frame()
+HTO_for_cell = mdata@active.ident %>% as.data.frame()
+
+
+#colnames(gene_count_per_cell) == row.names(HTO_for_cell) this should be all TRUE
+colnames(gene_count_per_cell) = HTO_for_cell[,1]
+```
+
+
+
+```{r}
+HTO1_vals = which(colnames(gene_count_per_cell) == c("HTO1"))
+HTO2_vals = which(colnames(gene_count_per_cell) == "HTO2")
+
+HTO_1_2_vals = append(HTO1_vals, HTO2_vals)
+
+seed_number = 2
+
+set.seed(seed_number)
+a = sample(HTO_1_2_vals,199)
+
+paste("no. of HTO1 in a is :", intersect(a,HTO1_vals) %>% length())
+paste("no. of HTO2 in a is :", intersect(a,HTO2_vals) %>% length())
+
+HTO_1_2_vals.1 = a
+HTO_1_2_vals =  HTO_1_2_vals[!HTO_1_2_vals %in% a]
+
+set.seed(seed_number)
+b = sample(HTO_1_2_vals,198)
+paste("no. of HTO1 in b is :", intersect(b,HTO1_vals) %>% length())
+paste("no. of HTO2 in b is :", intersect(b,HTO2_vals) %>% length())
+HTO_1_2_vals.2 = b
+HTO_1_2_vals =  HTO_1_2_vals[!HTO_1_2_vals %in% b]
+
+set.seed(seed_number)
+c = sample(HTO_1_2_vals,199)
+paste("no. of HTO1 in c is :", intersect(c,HTO1_vals) %>% length())
+paste("no. of HTO2 in c is :", intersect(c,HTO2_vals) %>% length())
+HTO_1_2_vals.3 = c
+HTO_1_2_vals =  HTO_1_2_vals[!HTO_1_2_vals %in% c]
+
+HTO_1_2_vals.4 = HTO_1_2_vals
+paste("no. of HTO1 in HTO_1_2_vals.4 is :", intersect(HTO_1_2_vals.4,HTO1_vals) %>% length())
+paste("no. of HTO2 in HTO_1_2_vals.4 is :", intersect(HTO_1_2_vals.4,HTO2_vals) %>% length())
+
+HTO1.1_sum = rowSums(gene_count_per_cell[,HTO_1_2_vals.1])
+HTO1.2_sum = rowSums(gene_count_per_cell[,HTO_1_2_vals.2])
+HTO1.3_sum = rowSums(gene_count_per_cell[,HTO_1_2_vals.3])
+HTO1.4_sum = rowSums(gene_count_per_cell[,HTO_1_2_vals.4])
+
+HTO1_deconvulted = data.frame(HTO1.1_sum,HTO1.2_sum,HTO1.3_sum,HTO1.4_sum)
+
+HTO3_vals = which(colnames(gene_count_per_cell) == "HTO3")
+HTO3_deconvulted = gene_count_per_cell[,HTO3_vals, drop = FALSE] %>% as.data.frame()
+HTO3_deconvulted$HTO3.1_sum = rowSums(HTO3_deconvulted[,1:225])       #Splitting samples
+HTO3_deconvulted$HTO3.2_sum = rowSums(HTO3_deconvulted[,226:450])
+HTO3_deconvulted$HTO3.3_sum = rowSums(HTO3_deconvulted[,451:675])
+HTO3_deconvulted = HTO3_deconvulted[, c("HTO3.1_sum","HTO3.2_sum","HTO3.3_sum"), drop =FALSE]
+
+HTO4_vals = which(colnames(gene_count_per_cell) == "HTO4")
+HTO4_deconvulted = gene_count_per_cell[,HTO4_vals, drop = FALSE] %>% as.data.frame()
+HTO4_deconvulted$HTO4.1_sum = rowSums(HTO4_deconvulted[,1:210])
+HTO4_deconvulted$HTO4.2_sum = rowSums(HTO4_deconvulted[,211:420])
+HTO4_deconvulted$HTO4.3_sum = rowSums(HTO4_deconvulted[,421:630])
+HTO4_deconvulted$HTO4.4_sum = rowSums(HTO4_deconvulted[,630:840])
+HTO4_deconvulted = HTO4_deconvulted[, c("HTO4.1_sum","HTO4.2_sum","HTO4.3_sum","HTO4.4_sum"), drop =FALSE]
+
+
+
+# trying to append all datasets
+
+
+HTOs = HTO1_deconvulted
+HTOs$HTO3.1_sum = HTO3_deconvulted[,1]
+HTOs$HTO3.2_sum = HTO3_deconvulted[,2]
+HTOs$HTO3.3_sum = HTO3_deconvulted[,3]
+HTOs$HTO4.1_sum = HTO4_deconvulted[,1]
+HTOs$HTO4.2_sum = HTO4_deconvulted[,2]
+HTOs$HTO4.3_sum = HTO4_deconvulted[,3]
+HTOs$HTO4.4_sum = HTO4_deconvulted[,4]
+
+```
+
+If we look at the table above, the scale of values from FCS (from bohlen data) is very different to any of our samples, including Serum. This means we cant compare directly?
+we can just see if our results match theirs?
+
+
+```{r filtering data}
+
+rm = rowMeans(HTOs, na.rm = TRUE)
+length(rm)
+length(rm[rm>0.0001])
+expressed_genes = which(rm>0.0001)
+HTOs = HTOs[expressed_genes,]
+
+
+
+```
+
+
+
+
+Creating column metadata dataframe for Deseq. we will create a df for HTOs.bohlen and just HTOs, depending on which comparisons we want to run
+```{r column metadata}
+## Df for HTOs
+Data_source <-c(rep('Ours',11)) %>% as.factor()
+Condition <- c(rep('TICH',4),rep('LPS',3),rep('Serum',4)) %>% as.factor()
+Condition_TICHseperated <- c("TICH-1","TICH-2","TICH-3", "TICH-4",rep('LPS',3),rep('Serum',4)) %>% as.factor()
+
+HTOs_columns_metadata = data.frame(Condition,Data_source, Condition_TICHseperated,row.names = colnames(HTOs))
+
+```
+
+
+
+## DEseq2
+
+
+```{r Deseq2}
+
+# creating DeSeq object
+dds <- DESeqDataSetFromMatrix(HTOs, #Make sure to specify correct input data & colData
+                              colData = HTOs_columns_metadata, 
+                              design = ~ Condition )
+
+
+# Transform counts for data visualization & outlier detection (PCA & Heatmap)
+rld <- rlog(dds, blind=TRUE)   #normalize and rlog transforms raw counts
+
+# Plot PCA
+
+DESeq2::plotPCA(rld, intgroup = "Condition")
+
+# Extract the rlog matrix from the object and compute pairwise correlation values
+rld_mat <- assay(rld)
+rld_cor <- cor(rld_mat)
+
+# Plot heatmap
+pheatmap::pheatmap(rld_cor, annotation = HTOs_columns_metadata[, c("Condition"), drop=F])
+
+# Run DESeq2 differential expression analysis
+dds <- DESeq(dds)
+# Plot dispersion estimates
+plotDispEsts(dds)
+```
+
+We can choose which groups we would like to compare between by specifying the 'contrast' parameter
+
+```{r contrast}
+
+contrast_serum_LPS <- c("Condition", "Serum", "LPS")
+
+contrast_serum_TICH <- c("Condition", "Serum", "TICH")
+
+contrast_LPS_TICH <- c("Condition", "LPS", "TICH")
+
+contrast_TICH4_TICH1 <- c("Condition_TICHseperated", "TICH-4", "TICH-1")
+
+res <- results(dds, 
+               contrast = contrast_serum_TICH,
+               alpha = 0.05)
+
+
+res <- lfcShrink(dds, 
+                 contrast =  contrast_serum_TICH,
+                 res=res,
+                 type = "normal") # type=apeglm did not work, wonder why
+
+```
+
+Generating table of results and extracting desired values
+```{r results}
+res_tbl <- res %>%
+  data.frame() %>%
+  rownames_to_column(var="gene") %>%
+  as_tibble()
+
+# Check results output
+res_tbl
+
+# Table of results for significant genes
+# Set thresholds
+padj_cutoff <- 0.05
+
+# Subset the significant results
+sig_res <- dplyr::filter(res_tbl, padj < padj_cutoff) %>%
+  dplyr::arrange(padj)
+
+# Check significant genes output
+sig_res
+
+
+#Scatterplot of normalized expression of top 20 most significant genes
+
+normalized_counts <- counts(dds, 
+                            normalized = TRUE)
+
+## Order results by padj values
+top20_sig_genes <- sig_res %>%
+  dplyr::arrange(padj) %>%
+  dplyr::pull(gene) %>%
+  head(n=20)
+
+
+top20_sig_norm <- data.frame(normalized_counts) %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::filter(gene %in% top20_sig_genes)
+
+
+gathered_top20_sig <- top20_sig_norm %>%
+  gather(colnames(top20_sig_norm)[2:length(colnames(top20_sig_norm))], key = "samplename", value = "normalized_counts")
+
+# Giving gathered_top_20_sig designations for condition
+gathered_top20_sig$Condition = c(rep("TICH",80) , rep("LPS", 120-60), rep("Serum",200-120))
+
+```
+
+##Visualizing results
+
+Scatterplot
+```{r scatterplot}
+
+ggplot(gathered_top20_sig) +
+  geom_point(aes(x = gene, 
+                 y = normalized_counts, 
+                 color = Condition, 
+                 size = 0.5), 
+             position=position_jitter(w=0.1,h=0)) +
+  scale_y_log10() +
+  xlab("Genes") +
+  ylab("log10 Normalized Counts") +
+  ggtitle("Top 20 Significant DE Genes for selected contrast group") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) + 
+  theme(plot.title = element_text(hjust = 0.5))
+
+# Heatmap of all genes
+
+# Extract normalized counts for only the significant genes
+sig_norm <- data.frame(normalized_counts) %>%
+  rownames_to_column(var = "gene") %>%
+  dplyr::filter(gene %in% sig_res$gene)
+
+# Set a color palette
+heat_colors <- brewer.pal(6, "YlOrRd")
+# Run pheatmap using the metadata data frame for the annotation
+pheatmap::pheatmap(sig_norm[ , 2:length(colnames(sig_norm))], 
+         color = heat_colors, # Find a cool color palette
+         cluster_rows = T, 
+         show_rownames = F,
+         annotation = HTOs_columns_metadata[, c("Condition", "Data_source")], 
+         border_color = NA, 
+         fontsize = 10, 
+         scale = "row", 
+         fontsize_row = 10, 
+         height = 20,
+         main = "Heatmap of DEGs between selected contrast groups")        
+
+
+```
+
+Volcano plot and MA plot
+```{r plots, fig.height=10}
+## Obtain logical vector where TRUE values denote padj values < 0.05 and fold change > 1.5 in either direction
+res_table_thres <- res_tbl %>% 
+  mutate(threshold = padj < 0.05 & abs(log2FoldChange) >= 0.58)
+
+
+## creating genelabels column for labelling
+res_table_thres<- res_table_thres %>% arrange(padj) %>% mutate(genelabels = "")
+
+# For specific genes, get position of them first then insert. 
+interest_genes = c("Apoe","Cst3","C1qa","C1qb","C1qc","Scd2","Sod2","Spp1","Tmem176a","Tmem176b","Clec4a1","Lsp1")
+interest_pos = match(interest_genes,res_table_thres$gene)
+
+res_table_thres$genelabels[interest_pos] <- res_table_thres$gene[interest_pos]
+
+## Volcano plot
+ggplot(res_table_thres, aes(x = log2FoldChange, y = -log10(padj))) +
+  geom_point(aes(colour = threshold)) +
+  geom_text_repel(aes(label = genelabels)) +
+  ggtitle("Volcano plot of DEGs between selected contrast groups") +
+  xlab("log2 fold change") + 
+  ylab("-log10 adjusted p-value") +
+  #scale_y_continuous(limits = c(0,50)) +     (this line makes plot look cleaner but labels dont work if used)
+  theme(legend.position = "none",
+        plot.title = element_text(size = rel(1.5), hjust = 0.5),
+        axis.title = element_text(size = rel(1.25)))  + theme(panel.border = element_blank(),
+                                                             panel.grid.major = element_blank(),
+                                                             panel.grid.minor = element_blank()) + coord_cartesian(ylim = c(0,200))
+
+
+
+# MA plot; requires 3 columns: mean, log fold change, logical table like threshold or significance
+
+ma = res_table_thres[, c("baseMean", "log2FoldChange", "threshold")]
+
+plotMA(ma,ylim=c(-3,3))
+
+```
+
+Conducting fischer test now. for our data, DE genes are 3881 and total expressed genes are 13,512. for Bohlen, DE genes are 1395, total genes are 11380
+
+```{r}
+
+dat = matrix( data = c(1395,11380,3881,13512), ncol = 2)
+row.names(dat) = c("DEG","total Expressed")
+colnames(dat) = c("Bohlen","Single cell")
+dat
+test = fisher.test(dat)
+test
+test$p.value
+
+```
+
